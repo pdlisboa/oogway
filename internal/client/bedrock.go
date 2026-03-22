@@ -3,61 +3,90 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
-	"sync"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockagentruntime/types"
+	"github.com/google/uuid"
+)
+
+const (
+	defaultBedrockRegion = "us-east-1"
+	defaultAgentID       = "xxxx"
+	defaultAgentAliasID  = "xxxxx"
 )
 
 type BedrockClient struct {
-	client *bedrockagentruntime.Client
+	client       *bedrockagentruntime.Client
+	agentID      string
+	agentAliasID string
+	sessionID    string
 }
 
-func NewBedrockCLient() (AgentClient, error) {
-	var bedrockagentRuntimeClient *bedrockagentruntime.Client
-	sync.OnceFunc(func() {
-		ctx := context.TODO()
-		sdkConfig, initError := config.LoadDefaultConfig(ctx, config.WithRegion("us-west-2"))
-		if initError != nil {
-			slog.Error("Error loading default config", "error", initError)
-			return
-		}
+func NewBedrockClient() (AgentClient, error) {
+	sdkConfig, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(defaultBedrockRegion))
+	if err != nil {
+		slog.Error("Error loading default AWS config", "error", err)
+		return nil, fmt.Errorf("load default AWS config: %w", err)
+	}
 
-		bedrockagentRuntimeClient = bedrockagentruntime.NewFromConfig(sdkConfig)
-	})
 	return BedrockClient{
-		client: bedrockagentRuntimeClient,
+		client:       bedrockagentruntime.NewFromConfig(sdkConfig),
+		agentID:      defaultAgentID,
+		agentAliasID: defaultAgentAliasID,
+		sessionID:    uuid.NewString(),
 	}, nil
 }
 
 func (br BedrockClient) Send(ctx context.Context, req string) (string, error) {
-
 	if br.client == nil {
-		return "", errors.New("Client not initialized")
+		return "", errors.New("client not initialized")
+	}
+
+	if strings.TrimSpace(req) == "" {
+		return "", errors.New("request cannot be empty")
 	}
 
 	params := &bedrockagentruntime.InvokeAgentInput{
-		AgentId:      aws.String("YourAgentID"),
-		AgentAliasId: aws.String("YourAgentAliasID"),
+		AgentId:      aws.String(br.agentID),
+		AgentAliasId: aws.String(br.agentAliasID),
 		InputText:    aws.String(req),
-		SessionId:    aws.String("RandomSessionID"),
+		SessionId:    aws.String(br.sessionID),
 	}
-	invoke, err := br.client.InvokeAgent(context.Background(), params)
+
+	slog.Debug("Bedrock InvokeAgent request",
+		"agentID", br.agentID,
+		"aliasID", br.agentAliasID,
+		"sessionID", br.sessionID,
+		"inputLen", len(req))
+
+	invoke, err := br.client.InvokeAgent(ctx, params)
 
 	if err != nil {
 		return "", err
 	}
+	defer invoke.GetStream().Close()
 
-	var result string
+	var result strings.Builder
 	for event := range invoke.GetStream().Events() {
 		switch e := event.(type) {
 		case *types.ResponseStreamMemberChunk:
-			result = string(e.Value.Bytes)
+			_, err = result.Write(e.Value.Bytes)
+			if err != nil {
+				return "", fmt.Errorf("write response chunk: %w", err)
+			}
+		case *types.UnknownUnionMember:
+			slog.Warn("Unknown Bedrock event received", "tag", e.Tag)
 		}
 	}
 
-	return result, nil
+	if err := invoke.GetStream().Err(); err != nil {
+		return "", fmt.Errorf("read response stream: %w", err)
+	}
+
+	return result.String(), nil
 }

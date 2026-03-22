@@ -11,7 +11,8 @@ import (
 var chatsCommands = &cobra.Command{
 	Use: "chat",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, _ := client.NewOpenrouterCLient("key", map[string]string{})
+		// client, _ := client.NewOpenrouterCLient("key", map[string]string{})
+		client, _ := client.NewBedrockClient()
 		p := tea.NewProgram(ui.New(client))
 		_, err := p.Run()
 		return err
